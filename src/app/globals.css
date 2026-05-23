@@ -1,0 +1,83 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Brand-tinted neutrals (warm beige base) */
+    --background: 36 40% 96%; /* 베이지 #F5EFE6 근사 */
+    --foreground: 28 30% 12%; /* 다크브라운 텍스트 */
+
+    --card: 0 0% 100%;
+    --card-foreground: 28 30% 12%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 28 30% 12%;
+
+    /* primary = 다크브라운 #3D2E1F */
+    --primary: 28 33% 18%;
+    --primary-foreground: 36 40% 96%;
+
+    --secondary: 30 15% 92%;
+    --secondary-foreground: 28 30% 18%;
+
+    --muted: 30 15% 92%;
+    --muted-foreground: 28 10% 42%;
+
+    /* accent = 웜앰버 #BA7517 */
+    --accent: 30 80% 41%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 70% 45%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 30 15% 86%;
+    --input: 30 15% 86%;
+    --ring: 28 33% 18%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 28 18% 8%;
+    --foreground: 36 30% 92%;
+
+    --card: 28 20% 12%;
+    --card-foreground: 36 30% 92%;
+
+    --popover: 28 20% 12%;
+    --popover-foreground: 36 30% 92%;
+
+    --primary: 36 30% 92%;
+    --primary-foreground: 28 33% 18%;
+
+    --secondary: 28 14% 20%;
+    --secondary-foreground: 36 30% 92%;
+
+    --muted: 28 14% 20%;
+    --muted-foreground: 30 10% 65%;
+
+    --accent: 30 75% 50%;
+    --accent-foreground: 28 18% 8%;
+
+    --destructive: 0 60% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 28 14% 22%;
+    --input: 28 14% 22%;
+    --ring: 36 30% 92%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
