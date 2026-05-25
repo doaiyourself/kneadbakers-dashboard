@@ -23,11 +23,19 @@ const serverEnvSchema = z.object({
   KAKAO_CLIENT_ID: z.string().min(1, "KAKAO_CLIENT_ID is required"),
   KAKAO_CLIENT_SECRET: z.string().min(1, "KAKAO_CLIENT_SECRET is required"),
 
+  // Google OAuth (선택 — 비어 있으면 Google 로그인 버튼은 표시되지 않음/거부됨)
+  GOOGLE_CLIENT_ID: z.string().optional().default(""),
+  GOOGLE_CLIENT_SECRET: z.string().optional().default(""),
+
   // 카카오 계정 화이트리스트 (콤마 구분). 이 이메일/ID로 로그인하면 owner 자동 부여.
   // 둘 중 하나라도 채워져 있으면 화이트리스트 모드 활성화 — 그 외 로그인은 거부.
   // 둘 다 비어 있으면 첫 로그인 사용자가 owner가 되는 TOFU 모드 (개발 편의).
   OWNER_KAKAO_EMAILS: z.string().optional().default(""),
   OWNER_KAKAO_IDS: z.string().optional().default(""),
+
+  // Google 계정 화이트리스트 (콤마 구분, 이메일만). 매칭 시 owner 자동 부여.
+  // 비어 있으면 Google 신규 가입은 거부 (기존 카카오 유저 이메일 매칭 시에만 google_id 링크).
+  OWNER_GOOGLE_EMAILS: z.string().optional().default(""),
 
   CRON_SECRET: z.string().min(1, "CRON_SECRET is required"),
 
@@ -122,6 +130,28 @@ export function getKakaoWhitelist() {
     /** 화이트리스트가 명시적으로 설정되어 있는지 */
     isExplicit: emails.length > 0 || ids.length > 0,
   };
+}
+
+/**
+ * Google 화이트리스트 파싱. 이메일만 콤마 구분.
+ * 비어 있으면 Google 신규 가입은 거부 (단, 이메일이 기존 카카오 유저와 매칭되면 google_id 링크).
+ */
+export function getGoogleWhitelist() {
+  const env = getServerEnv();
+  const emails = (env.OWNER_GOOGLE_EMAILS ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return {
+    emails,
+    isExplicit: emails.length > 0,
+  };
+}
+
+/** Google OAuth가 사용 가능한지 — Client ID/Secret 둘 다 있어야 함 */
+export function isGoogleAuthEnabled(): boolean {
+  const env = getServerEnv();
+  return !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET);
 }
 
 /** Asia/Seoul 타임존 상수 */

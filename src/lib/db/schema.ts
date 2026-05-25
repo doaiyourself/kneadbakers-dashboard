@@ -224,17 +224,19 @@ export const syncJobs = pgTable("sync_jobs", {
 });
 
 /* ============================================================
- * 9. users — 점주/매니저/직원 (카카오 OAuth 전용)
+ * 9. users — 점주/매니저/직원 (카카오 + Google OAuth)
  *
- * - kakao_id가 1차 식별자. 카카오 계정당 사용자 1명.
- * - email은 카카오가 제공하지 않을 수 있어 nullable. UNIQUE는 유지(NULL은 충돌 없음).
- * - 접근 권한: OWNER_KAKAO_EMAILS env 화이트리스트로 owner 자동 부여,
- *   그 외 등록되지 않은 카카오 로그인은 거부(자동 가입 X — 매출 데이터 보호).
+ * - kakao_id 또는 google_id로 식별. 같은 사람이 두 provider를 동시에 link 가능(이메일 매칭).
+ * - 둘 다 NULL인 row는 만들어지지 않도록 애플리케이션 레벨에서 보장.
+ * - email은 provider가 제공 안 할 수 있어 nullable. UNIQUE는 유지(NULL은 충돌 없음).
+ * - 접근 권한: OWNER_KAKAO_EMAILS/IDS, OWNER_GOOGLE_EMAILS 화이트리스트로 owner 자동 부여,
+ *   그 외 등록되지 않은 로그인은 거부(자동 가입 X — 매출 데이터 보호).
  * - 추가 사용자는 owner가 settings에서 명시 등록.
  * ========================================================== */
 export const users = pgTable("users", {
   id: bigserial("id", { mode: "number" }).primaryKey(),
-  kakaoId: text("kakao_id").unique().notNull(),
+  kakaoId: text("kakao_id").unique(),
+  googleId: text("google_id").unique(),
   email: text("email").unique(),
   name: text("name"),
   imageUrl: text("image_url"),
