@@ -654,6 +654,7 @@ export interface ChannelSlice {
   revenue: number;
   count: number;
   share: number;
+  avgTicket: number;
 }
 
 export async function getChannelMix(range: DateRange = {}): Promise<ChannelSlice[]> {
@@ -668,12 +669,256 @@ export async function getChannelMix(range: DateRange = {}): Promise<ChannelSlice
     GROUP BY 1
     ORDER BY 2 DESC
   `);
-  const items = (rows ?? []).map((r) => ({
+  const items = (rows ?? []).map((r) => {
+    const revenue = Number(r.revenue);
+    const count = Number(r.cnt);
+    return {
+      source: r.source,
+      revenue,
+      count,
+      share: 0,
+      avgTicket: count > 0 ? Math.round(revenue / count) : 0,
+    };
+  });
+  const total = items.reduce((s, x) => s + x.revenue, 0);
+  return items.map((x) => ({ ...x, share: total > 0 ? x.revenue / total : 0 }));
+}
+
+/* ============================================================
+ * 채널 × 일별 매출 (스택 차트용)
+ * ========================================================== */
+export interface ChannelDailyPoint {
+  date: string;
+  source: string;
+  revenue: number;
+  orderCount: number;
+}
+
+export async function getChannelDailySeries(range: DateRange = {}): Promise<ChannelDailyPoint[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const rows = await db.execute<{
+    date: string;
+    source: string;
+    revenue: string;
+    order_count: string;
+  }>(sql`
+    SELECT
+      to_char(date_trunc('day', completed_at AT TIME ZONE 'Asia/Seoul'), 'YYYY-MM-DD') AS date,
+      source,
+      COALESCE(SUM(total_amount), 0)::bigint AS revenue,
+      COUNT(*)::bigint AS order_count
+    FROM orders
+    WHERE order_state = 'COMPLETED' AND ${rangeClause(r)}
+    GROUP BY 1, 2
+    ORDER BY 1
+  `);
+  return (rows ?? []).map((r) => ({
+    date: r.date,
     source: r.source,
+    revenue: Number(r.revenue),
+    orderCount: Number(r.order_count),
+  }));
+}
+
+/* ============================================================
+ * 채널별 인기 상품
+ * ========================================================== */
+export interface ChannelTopProduct {
+  source: string;
+  itemTitle: string;
+  quantity: number;
+  revenue: number;
+}
+
+export async function getChannelTopProducts(
+  range: DateRange & { perChannel?: number } = {},
+): Promise<ChannelTopProduct[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const perChannel = range.perChannel ?? 5;
+  const rows = await db.execute<{
+    source: string;
+    item_title: string;
+    quantity: string;
+    revenue: string;
+    rank: string;
+  }>(sql`
+    SELECT * FROM (
+      SELECT
+        o.source,
+        l.item_title,
+        SUM(l.quantity)::bigint AS quantity,
+        SUM(l.net_amount)::bigint AS revenue,
+        ROW_NUMBER() OVER (PARTITION BY o.source ORDER BY SUM(l.net_amount) DESC) AS rank
+      FROM order_line_items l
+      JOIN orders o ON o.id = l.order_id
+      WHERE o.order_state = 'COMPLETED' AND ${rangeClause(r, "o.completed_at")}
+      GROUP BY o.source, l.item_title
+    ) ranked
+    WHERE rank <= ${perChannel}
+    ORDER BY source, rank
+  `);
+  return (rows ?? []).map((r) => ({
+    source: r.source,
+    itemTitle: r.item_title,
+    quantity: Number(r.quantity),
+    revenue: Number(r.revenue),
+  }));
+}
+
+/* ============================================================
+ * 카드사(acquirer)별 결제
+ * ========================================================== */
+export interface CardAcquirerSlice {
+  acquirer: string;
+  revenue: number;
+  count: number;
+  share: number;
+}
+
+export async function getCardAcquirerMix(range: DateRange = {}): Promise<CardAcquirerSlice[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const rows = await db.execute<{ acquirer: string | null; revenue: string; cnt: string }>(sql`
+    SELECT
+      COALESCE(NULLIF(p.acquirer, ''), '기타') AS acquirer,
+      COALESCE(SUM(p.amount), 0)::bigint AS revenue,
+      COUNT(*)::bigint AS cnt
+    FROM payments p
+    JOIN orders o ON o.id = p.order_id
+    WHERE o.order_state = 'COMPLETED'
+      AND p.state = '승인'
+      AND p.method = '카드'
+      AND ${rangeClause(r, "o.completed_at")}
+    GROUP BY 1
+    ORDER BY 2 DESC
+  `);
+  const items = (rows ?? []).map((r) => ({
+    acquirer: r.acquirer ?? "기타",
     revenue: Number(r.revenue),
     count: Number(r.cnt),
     share: 0,
   }));
   const total = items.reduce((s, x) => s + x.revenue, 0);
   return items.map((x) => ({ ...x, share: total > 0 ? x.revenue / total : 0 }));
+}
+
+/* ============================================================
+ * 결제 취소율
+ * ========================================================== */
+export interface CancellationStats {
+  totalPayments: number;
+  cancelledPayments: number;
+  cancelRate: number;
+  cancelledAmount: number;
+}
+
+export async function getCancellationStats(range: DateRange = {}): Promise<CancellationStats> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const rows = await db.execute<{
+    total: string;
+    cancelled: string;
+    cancelled_amount: string;
+  }>(sql`
+    SELECT
+      COUNT(*)::bigint AS total,
+      COUNT(*) FILTER (WHERE p.state = '취소')::bigint AS cancelled,
+      COALESCE(SUM(p.amount) FILTER (WHERE p.state = '취소'), 0)::bigint AS cancelled_amount
+    FROM payments p
+    JOIN orders o ON o.id = p.order_id
+    WHERE ${rangeClause(r, "o.completed_at")}
+  `);
+  const r0 = rows[0];
+  const total = Number(r0?.total ?? 0);
+  const cancelled = Number(r0?.cancelled ?? 0);
+  return {
+    totalPayments: total,
+    cancelledPayments: cancelled,
+    cancelRate: total > 0 ? cancelled / total : 0,
+    cancelledAmount: Number(r0?.cancelled_amount ?? 0),
+  };
+}
+
+/* ============================================================
+ * 주문 페이지 — 검색/필터
+ * ========================================================== */
+export interface OrderListItem {
+  id: string;
+  orderNumber: string | null;
+  source: string;
+  orderState: string;
+  totalAmount: number;
+  completedAt: string | null;
+  paymentMethods: string[];
+  lineCount: number;
+}
+
+export async function listOrders(
+  opts: DateRange & {
+    source?: string;
+    orderState?: string;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+): Promise<{ items: OrderListItem[]; total: number }> {
+  const r: DateRange = { ...opts, fallbackDays: 7 };
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  const sourceFilter = opts.source ? sql`AND o.source = ${opts.source}` : sql``;
+  const stateFilter = opts.orderState ? sql`AND o.order_state = ${opts.orderState}` : sql``;
+  const searchFilter = opts.search
+    ? sql`AND (o.id ILIKE ${"%" + opts.search + "%"} OR o.order_number ILIKE ${"%" + opts.search + "%"})`
+    : sql``;
+
+  const rows = await db.execute<{
+    id: string;
+    order_number: string | null;
+    source: string;
+    order_state: string;
+    total_amount: string;
+    completed_at: string | null;
+    methods: string[];
+    line_count: string;
+  }>(sql`
+    SELECT
+      o.id,
+      o.order_number,
+      o.source,
+      o.order_state,
+      o.total_amount::bigint,
+      to_char(o.completed_at AT TIME ZONE 'Asia/Seoul', 'YYYY-MM-DD HH24:MI') AS completed_at,
+      ARRAY(
+        SELECT DISTINCT p.method FROM payments p WHERE p.order_id = o.id
+      ) AS methods,
+      (SELECT COUNT(*)::int FROM order_line_items l WHERE l.order_id = o.id) AS line_count
+    FROM orders o
+    WHERE 1=1
+      AND ${rangeClause(r)}
+      ${sourceFilter}
+      ${stateFilter}
+      ${searchFilter}
+    ORDER BY o.completed_at DESC NULLS LAST
+    LIMIT ${limit} OFFSET ${offset}
+  `);
+
+  const totalRow = await db.execute<{ n: string }>(sql`
+    SELECT COUNT(*)::bigint AS n FROM orders o
+    WHERE ${rangeClause(r)}
+      ${sourceFilter}
+      ${stateFilter}
+      ${searchFilter}
+  `);
+
+  return {
+    items: (rows ?? []).map((r) => ({
+      id: r.id,
+      orderNumber: r.order_number,
+      source: r.source,
+      orderState: r.order_state,
+      totalAmount: Number(r.total_amount),
+      completedAt: r.completed_at,
+      paymentMethods: r.methods ?? [],
+      lineCount: Number(r.line_count),
+    })),
+    total: Number(totalRow[0]?.n ?? 0),
+  };
 }
