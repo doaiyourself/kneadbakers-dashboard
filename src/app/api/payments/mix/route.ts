@@ -9,10 +9,11 @@ export async function GET(req: Request) {
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const url = new URL(req.url);
-  const days = Number(url.searchParams.get("days") ?? "30");
+  const from = url.searchParams.get("from") ?? undefined;
+  const to = url.searchParams.get("to") ?? undefined;
   try {
-    const data = await getPaymentMethodMix(Number.isFinite(days) && days > 0 ? days : 30);
-    return NextResponse.json({ days, data });
+    const data = await getPaymentMethodMix({ from, to });
+    return NextResponse.json({ from, to, data });
   } catch (e) {
     console.error("[/api/payments/mix]", e);
     return NextResponse.json({ error: "Internal error" }, { status: 500 });

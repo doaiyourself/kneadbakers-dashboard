@@ -18,12 +18,16 @@ const PRI_STYLE: Record<Recommendation["priority"], string> = {
   저: "bg-slate-100 text-slate-600",
 };
 
-export function Insights() {
+export interface InsightsProps {
+  from: string;
+  to: string;
+}
+
+export function Insights({ from, to }: InsightsProps) {
   const { data, error, isLoading } = useSWR<InsightsResult>(
-    "/api/insights/recommendations?windowDays=30",
+    `/api/insights/recommendations?from=${from}&to=${to}`,
     fetcher,
     {
-      // Claude 호출이 비싸서 자동 재요청 끔
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
       refreshInterval: 0,
@@ -33,32 +37,32 @@ export function Insights() {
   if (isLoading) {
     return (
       <div className="rounded-lg border border-border bg-card p-5 shadow-sm">
-        <h2 className="font-semibold">🤖 AI 운영 추천</h2>
-        <p className="mt-2 text-xs text-muted-foreground">분석 중… (Claude 호출 5-15초)</p>
+        <h2 className="font-semibold">🤖 운영 인사이트</h2>
+        <p className="mt-2 text-xs text-muted-foreground">분석 중…</p>
       </div>
     );
   }
   if (error || !data) {
     return (
       <div className="rounded-lg border border-border bg-card p-5 shadow-sm">
-        <h2 className="font-semibold">🤖 AI 운영 추천</h2>
-        <p className="mt-2 text-xs text-rose-600">불러오기 실패. 잠시 후 다시 시도해 주세요.</p>
+        <h2 className="font-semibold">🤖 운영 인사이트</h2>
+        <p className="mt-2 text-xs text-rose-600">불러오기 실패. 잠시 후 다시 시도해주세요.</p>
       </div>
     );
   }
 
   return (
     <div className="rounded-lg border border-border bg-card p-5 shadow-sm">
-      <div className="mb-4 flex items-baseline justify-between">
-        <h2 className="font-semibold">🤖 AI 운영 추천</h2>
+      <div className="mb-4 flex items-baseline justify-between gap-2">
+        <h2 className="font-semibold">🤖 운영 인사이트</h2>
         <span className="text-[11px] text-muted-foreground">
-          {data.source === "claude" ? "Claude 분석" : "Rule-based"} · {data.windowDays}일 윈도우
+          {data.source === "claude" ? "Claude 분석" : "룰 기반 분석"}
         </span>
       </div>
 
       <p className="mb-4 rounded-md bg-muted/50 p-3 text-sm leading-relaxed">{data.summary}</p>
 
-      <ul className="space-y-2">
+      <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
         {data.recommendations.map((r, i) => {
           const s = KIND_STYLE[r.kind];
           return (
@@ -68,7 +72,9 @@ export function Insights() {
                   <span className="mr-1">{s.icon}</span>
                   {r.title}
                 </h3>
-                <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${PRI_STYLE[r.priority]}`}>
+                <span
+                  className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${PRI_STYLE[r.priority]}`}
+                >
                   {r.priority}
                 </span>
               </div>

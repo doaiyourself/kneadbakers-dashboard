@@ -6,12 +6,43 @@
  *
  * 상태 정책: COMPLETED만 매출/객단가 계산에 포함.
  *   취소(CANCELLED)는 cancellationRate 같은 보조 지표에서만 사용.
+ *
+ * 범위 정책: 모든 함수가 from/to(KST naive) 또는 days를 받음.
+ *   from/to 우선 → 명시적 범위 / 없으면 마지막 N일.
  */
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { db } from "@/lib/db/client";
 
 /* ============================================================
- * KPI Summary — 오늘/이번주/이번달 + 직전 동기 비교
+ * 공통 — 범위 WHERE 절 빌더
+ * ========================================================== */
+export interface DateRange {
+  /** Asia/Seoul naive ISO ("2026-01-01" 또는 "2026-01-01T00:00:00") */
+  from?: string;
+  to?: string;
+  /** from/to 미지정 시 fallback */
+  fallbackDays?: number;
+}
+
+function rangeClause(r: DateRange | undefined, completedCol = "completed_at"): SQL {
+  // completed_at은 timestamp with time zone (UTC 저장). 비교는 KST 변환 후 일관성 위해
+  // raw SQL은 'AT TIME ZONE Asia/Seoul' 적용된 좌변과, naive 우변(`timestamp without tz`) 사용.
+  if (r?.from && r?.to) {
+    return sql`(${sql.raw(completedCol)} AT TIME ZONE 'Asia/Seoul') >= ${r.from}::timestamp
+           AND (${sql.raw(completedCol)} AT TIME ZONE 'Asia/Seoul') < (${r.to}::timestamp + interval '1 day')`;
+  }
+  if (r?.from) {
+    return sql`(${sql.raw(completedCol)} AT TIME ZONE 'Asia/Seoul') >= ${r.from}::timestamp`;
+  }
+  if (r?.to) {
+    return sql`(${sql.raw(completedCol)} AT TIME ZONE 'Asia/Seoul') < (${r.to}::timestamp + interval '1 day')`;
+  }
+  const days = r?.fallbackDays ?? 30;
+  return sql`${sql.raw(completedCol)} >= (now() AT TIME ZONE 'Asia/Seoul' - make_interval(days => ${days}))`;
+}
+
+/* ============================================================
+ * KPI Summary — 오늘/이번주/이번달 + 직전 동기 비교 (기간 미고정)
  * ========================================================== */
 export interface KpiBucket {
   revenue: number;
@@ -27,18 +58,9 @@ export interface KpiSummary {
   lastWeek: KpiBucket;
   thisMonth: KpiBucket;
   lastMonth: KpiBucket;
-  /** 최근 주문 시각 (Asia/Seoul) — "데이터 신선도" 체크용 */
   lastOrderAt: string | null;
 }
 
-/**
- * 6개 구간의 KPI를 한 번에 계산. 전부 KST.
- * - 오늘: KST 자정부터
- * - 어제: 어제 자정 ~ 오늘 자정
- * - 이번주: 이번 월요일부터 (date_trunc('week', ...)는 월요일 시작)
- * - 지난주: 직전 월요일 ~ 이번 월요일
- * - 이번달 / 지난달: date_trunc('month', ...) 동일 패턴
- */
 export async function getKpiSummary(): Promise<KpiSummary> {
   const rows = await db.execute<{
     bucket: string;
@@ -124,29 +146,68 @@ export async function getKpiSummary(): Promise<KpiSummary> {
 }
 
 /* ============================================================
+ * 임의 기간 요약 — Jan-Apr 같은 명시적 범위
+ * ========================================================== */
+export interface RangeSummary {
+  revenue: number;
+  orderCount: number;
+  avgTicket: number;
+  cancelledCount: number;
+  dailyAvgRevenue: number;
+  /** 활성 영업일 수 (주문 1건 이상 있었던 날) */
+  activeDays: number;
+}
+
+export async function getRangeSummary(range: DateRange): Promise<RangeSummary> {
+  const rows = await db.execute<{
+    revenue: string | null;
+    order_count: string | null;
+    cancelled_count: string | null;
+    active_days: string | null;
+  }>(sql`
+    SELECT
+      COALESCE(SUM(total_amount) FILTER (WHERE order_state = 'COMPLETED'), 0)::bigint AS revenue,
+      COUNT(*) FILTER (WHERE order_state = 'COMPLETED')::bigint AS order_count,
+      COUNT(*) FILTER (WHERE cancelled_at IS NOT NULL)::bigint AS cancelled_count,
+      COUNT(DISTINCT (completed_at AT TIME ZONE 'Asia/Seoul')::date) FILTER (WHERE order_state = 'COMPLETED')::bigint AS active_days
+    FROM orders
+    WHERE completed_at IS NOT NULL AND ${rangeClause(range)}
+  `);
+  const r = rows[0];
+  const revenue = Number(r?.revenue ?? 0);
+  const orderCount = Number(r?.order_count ?? 0);
+  const activeDays = Number(r?.active_days ?? 0);
+  return {
+    revenue,
+    orderCount,
+    avgTicket: orderCount > 0 ? Math.round(revenue / orderCount) : 0,
+    cancelledCount: Number(r?.cancelled_count ?? 0),
+    activeDays,
+    dailyAvgRevenue: activeDays > 0 ? Math.round(revenue / activeDays) : 0,
+  };
+}
+
+/* ============================================================
  * 월별 시계열
  * ========================================================== */
 export interface MonthlyPoint {
-  /** YYYY-MM (KST) */
-  month: string;
+  month: string; // YYYY-MM (KST)
   revenue: number;
   orderCount: number;
   avgTicket: number;
 }
 
-export async function getMonthlySeries(months = 12): Promise<MonthlyPoint[]> {
-  const rows = await db.execute<{
-    month: string;
-    revenue: string;
-    order_count: string;
-  }>(sql`
+export async function getMonthlySeries(
+  range: DateRange & { months?: number } = {},
+): Promise<MonthlyPoint[]> {
+  const r: DateRange = { ...range, fallbackDays: (range.months ?? 12) * 30 };
+  const rows = await db.execute<{ month: string; revenue: string; order_count: string }>(sql`
     SELECT
       to_char(date_trunc('month', completed_at AT TIME ZONE 'Asia/Seoul'), 'YYYY-MM') AS month,
       COALESCE(SUM(total_amount), 0)::bigint AS revenue,
       COUNT(*)::bigint AS order_count
     FROM orders
-    WHERE order_state = 'COMPLETED'
-      AND completed_at >= (now() AT TIME ZONE 'Asia/Seoul' - make_interval(months => ${months}))
+    WHERE order_state = 'COMPLETED' AND ${rangeClause(r)}
     GROUP BY 1
     ORDER BY 1
   `);
@@ -163,29 +224,26 @@ export async function getMonthlySeries(months = 12): Promise<MonthlyPoint[]> {
 }
 
 /* ============================================================
- * 주별 시계열 (월요일 시작)
+ * 주별 시계열
  * ========================================================== */
 export interface WeeklyPoint {
-  /** YYYY-MM-DD — 그 주의 월요일 */
-  weekStart: string;
+  weekStart: string; // YYYY-MM-DD (월요일)
   revenue: number;
   orderCount: number;
   avgTicket: number;
 }
 
-export async function getWeeklySeries(weeks = 12): Promise<WeeklyPoint[]> {
-  const rows = await db.execute<{
-    week_start: string;
-    revenue: string;
-    order_count: string;
-  }>(sql`
+export async function getWeeklySeries(
+  range: DateRange & { weeks?: number } = {},
+): Promise<WeeklyPoint[]> {
+  const r: DateRange = { ...range, fallbackDays: (range.weeks ?? 12) * 7 };
+  const rows = await db.execute<{ week_start: string; revenue: string; order_count: string }>(sql`
     SELECT
       to_char(date_trunc('week', completed_at AT TIME ZONE 'Asia/Seoul'), 'YYYY-MM-DD') AS week_start,
       COALESCE(SUM(total_amount), 0)::bigint AS revenue,
       COUNT(*)::bigint AS order_count
     FROM orders
-    WHERE order_state = 'COMPLETED'
-      AND completed_at >= (now() AT TIME ZONE 'Asia/Seoul' - make_interval(weeks => ${weeks}))
+    WHERE order_state = 'COMPLETED' AND ${rangeClause(r)}
     GROUP BY 1
     ORDER BY 1
   `);
@@ -202,7 +260,7 @@ export async function getWeeklySeries(weeks = 12): Promise<WeeklyPoint[]> {
 }
 
 /* ============================================================
- * 일별 시계열 (지난 N일)
+ * 일별 시계열
  * ========================================================== */
 export interface DailyPoint {
   date: string; // YYYY-MM-DD (KST)
@@ -211,19 +269,17 @@ export interface DailyPoint {
   avgTicket: number;
 }
 
-export async function getDailySeries(days = 30): Promise<DailyPoint[]> {
-  const rows = await db.execute<{
-    date: string;
-    revenue: string;
-    order_count: string;
-  }>(sql`
+export async function getDailySeries(
+  range: DateRange & { days?: number } = {},
+): Promise<DailyPoint[]> {
+  const r: DateRange = { ...range, fallbackDays: range.days ?? 30 };
+  const rows = await db.execute<{ date: string; revenue: string; order_count: string }>(sql`
     SELECT
       to_char(date_trunc('day', completed_at AT TIME ZONE 'Asia/Seoul'), 'YYYY-MM-DD') AS date,
       COALESCE(SUM(total_amount), 0)::bigint AS revenue,
       COUNT(*)::bigint AS order_count
     FROM orders
-    WHERE order_state = 'COMPLETED'
-      AND completed_at >= (now() AT TIME ZONE 'Asia/Seoul' - make_interval(days => ${days}))
+    WHERE order_state = 'COMPLETED' AND ${rangeClause(r)}
     GROUP BY 1
     ORDER BY 1
   `);
@@ -241,8 +297,6 @@ export async function getDailySeries(days = 30): Promise<DailyPoint[]> {
 
 /* ============================================================
  * 시간대 히트맵 (요일 × 시간)
- *   - dow: 0(일) ~ 6(토). PostgreSQL EXTRACT(dow ...) 동일.
- *   - hour: 0~23
  * ========================================================== */
 export interface HeatmapCell {
   dow: number;
@@ -252,7 +306,10 @@ export interface HeatmapCell {
   avgTicket: number;
 }
 
-export async function getHourlyHeatmap(days = 30): Promise<HeatmapCell[]> {
+export async function getHourlyHeatmap(
+  range: DateRange & { days?: number } = {},
+): Promise<HeatmapCell[]> {
+  const r: DateRange = { ...range, fallbackDays: range.days ?? 30 };
   const rows = await db.execute<{
     dow: string;
     hour: string;
@@ -265,8 +322,7 @@ export async function getHourlyHeatmap(days = 30): Promise<HeatmapCell[]> {
       COALESCE(SUM(total_amount), 0)::bigint AS revenue,
       COUNT(*)::bigint AS order_count
     FROM orders
-    WHERE order_state = 'COMPLETED'
-      AND completed_at >= (now() AT TIME ZONE 'Asia/Seoul' - make_interval(days => ${days}))
+    WHERE order_state = 'COMPLETED' AND ${rangeClause(r)}
     GROUP BY 1, 2
     ORDER BY 1, 2
   `);
@@ -284,16 +340,54 @@ export async function getHourlyHeatmap(days = 30): Promise<HeatmapCell[]> {
 }
 
 /* ============================================================
+ * 요일별 매출 (요일 비교용)
+ * ========================================================== */
+export interface DowSlice {
+  dow: number;
+  revenue: number;
+  orderCount: number;
+  avgTicket: number;
+}
+
+export async function getDowSeries(range: DateRange = {}): Promise<DowSlice[]> {
+  const rows = await db.execute<{
+    dow: string;
+    revenue: string;
+    order_count: string;
+  }>(sql`
+    SELECT
+      EXTRACT(dow FROM (completed_at AT TIME ZONE 'Asia/Seoul'))::int AS dow,
+      COALESCE(SUM(total_amount), 0)::bigint AS revenue,
+      COUNT(*)::bigint AS order_count
+    FROM orders
+    WHERE order_state = 'COMPLETED' AND ${rangeClause({ ...range, fallbackDays: 30 })}
+    GROUP BY 1
+    ORDER BY 1
+  `);
+  return (rows ?? []).map((r) => {
+    const revenue = Number(r.revenue);
+    const orderCount = Number(r.order_count);
+    return {
+      dow: Number(r.dow),
+      revenue,
+      orderCount,
+      avgTicket: orderCount > 0 ? Math.round(revenue / orderCount) : 0,
+    };
+  });
+}
+
+/* ============================================================
  * 결제수단 비중
  * ========================================================== */
 export interface PaymentMethodSlice {
   method: string;
   revenue: number;
   count: number;
-  share: number; // 0~1
+  share: number;
 }
 
-export async function getPaymentMethodMix(days = 30): Promise<PaymentMethodSlice[]> {
+export async function getPaymentMethodMix(range: DateRange = {}): Promise<PaymentMethodSlice[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
   const rows = await db.execute<{ method: string; revenue: string; cnt: string }>(sql`
     SELECT
       p.method,
@@ -303,7 +397,7 @@ export async function getPaymentMethodMix(days = 30): Promise<PaymentMethodSlice
     JOIN orders o ON o.id = p.order_id
     WHERE o.order_state = 'COMPLETED'
       AND p.state = '승인'
-      AND p.paid_at >= (now() AT TIME ZONE 'Asia/Seoul' - make_interval(days => ${days}))
+      AND ${rangeClause(r, "o.completed_at")}
     GROUP BY 1
     ORDER BY 2 DESC
   `);
@@ -327,7 +421,11 @@ export interface ProductRanking {
   revenue: number;
 }
 
-export async function getTopProducts(days = 30, limit = 20): Promise<ProductRanking[]> {
+export async function getTopProducts(
+  range: DateRange & { limit?: number } = {},
+): Promise<ProductRanking[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const limit = range.limit ?? 20;
   const rows = await db.execute<{
     item_title: string;
     category_title: string | null;
@@ -341,8 +439,7 @@ export async function getTopProducts(days = 30, limit = 20): Promise<ProductRank
       SUM(l.net_amount)::bigint AS revenue
     FROM order_line_items l
     JOIN orders o ON o.id = l.order_id
-    WHERE o.order_state = 'COMPLETED'
-      AND o.completed_at >= (now() AT TIME ZONE 'Asia/Seoul' - make_interval(days => ${days}))
+    WHERE o.order_state = 'COMPLETED' AND ${rangeClause(r, "o.completed_at")}
     GROUP BY 1, 2
     ORDER BY revenue DESC
     LIMIT ${limit}
@@ -353,4 +450,230 @@ export async function getTopProducts(days = 30, limit = 20): Promise<ProductRank
     quantity: Number(r.quantity),
     revenue: Number(r.revenue),
   }));
+}
+
+/* ============================================================
+ * 상품 전체 — 카테고리 필터 가능, 정렬 옵션 지원
+ * ========================================================== */
+export interface ProductSales {
+  itemTitle: string;
+  categoryTitle: string | null;
+  quantity: number;
+  revenue: number;
+  avgPrice: number;
+  /** 이 상품을 포함한 주문 건수 (distinct orders) */
+  orderCount: number;
+}
+
+export async function getProductSales(
+  range: DateRange & { category?: string; limit?: number } = {},
+): Promise<ProductSales[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const limit = range.limit ?? 500;
+  const categoryFilter = range.category
+    ? sql`AND l.category_title = ${range.category}`
+    : sql``;
+  const rows = await db.execute<{
+    item_title: string;
+    category_title: string | null;
+    quantity: string;
+    revenue: string;
+    order_count: string;
+  }>(sql`
+    SELECT
+      l.item_title,
+      l.category_title,
+      SUM(l.quantity)::bigint AS quantity,
+      SUM(l.net_amount)::bigint AS revenue,
+      COUNT(DISTINCT l.order_id)::bigint AS order_count
+    FROM order_line_items l
+    JOIN orders o ON o.id = l.order_id
+    WHERE o.order_state = 'COMPLETED'
+      AND ${rangeClause(r, "o.completed_at")}
+      ${categoryFilter}
+    GROUP BY 1, 2
+    ORDER BY revenue DESC
+    LIMIT ${limit}
+  `);
+  return (rows ?? []).map((r) => {
+    const revenue = Number(r.revenue);
+    const quantity = Number(r.quantity);
+    return {
+      itemTitle: r.item_title,
+      categoryTitle: r.category_title,
+      quantity,
+      revenue,
+      avgPrice: quantity > 0 ? Math.round(revenue / quantity) : 0,
+      orderCount: Number(r.order_count),
+    };
+  });
+}
+
+/* ============================================================
+ * 카테고리 롤업 — 카테고리별 매출 비중
+ * ========================================================== */
+export interface CategoryRollup {
+  category: string;
+  quantity: number;
+  revenue: number;
+  productCount: number;
+  share: number;
+}
+
+export async function getCategoryRollup(range: DateRange = {}): Promise<CategoryRollup[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const rows = await db.execute<{
+    category: string;
+    quantity: string;
+    revenue: string;
+    product_count: string;
+  }>(sql`
+    SELECT
+      COALESCE(NULLIF(l.category_title, ''), '미분류') AS category,
+      SUM(l.quantity)::bigint AS quantity,
+      SUM(l.net_amount)::bigint AS revenue,
+      COUNT(DISTINCT l.item_title)::bigint AS product_count
+    FROM order_line_items l
+    JOIN orders o ON o.id = l.order_id
+    WHERE o.order_state = 'COMPLETED'
+      AND ${rangeClause(r, "o.completed_at")}
+    GROUP BY 1
+    ORDER BY revenue DESC
+  `);
+  const items = (rows ?? []).map((r) => ({
+    category: r.category,
+    quantity: Number(r.quantity),
+    revenue: Number(r.revenue),
+    productCount: Number(r.product_count),
+    share: 0,
+  }));
+  const total = items.reduce((s, x) => s + x.revenue, 0);
+  return items.map((x) => ({ ...x, share: total > 0 ? x.revenue / total : 0 }));
+}
+
+/* ============================================================
+ * 카니발리제이션 — 같은 주문에서 자주 묶이는 상품 쌍
+ * (a.title < b.title 로 중복 제거. self pair 제외.)
+ * ========================================================== */
+export interface ProductPair {
+  productA: string;
+  productB: string;
+  coOrders: number;
+  /** 두 상품 중 더 자주 팔린 상품 기준의 동시구매 비율 */
+  liftA?: number;
+}
+
+export async function getProductPairs(
+  range: DateRange & { limit?: number } = {},
+): Promise<ProductPair[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const limit = range.limit ?? 30;
+  const rows = await db.execute<{
+    product_a: string;
+    product_b: string;
+    co_orders: string;
+  }>(sql`
+    SELECT a.item_title AS product_a, b.item_title AS product_b, COUNT(*)::bigint AS co_orders
+    FROM order_line_items a
+    JOIN order_line_items b ON a.order_id = b.order_id AND a.item_title < b.item_title
+    JOIN orders o ON o.id = a.order_id
+    WHERE o.order_state = 'COMPLETED' AND ${rangeClause(r, "o.completed_at")}
+    GROUP BY 1, 2
+    HAVING COUNT(*) >= 5
+    ORDER BY co_orders DESC
+    LIMIT ${limit}
+  `);
+  return (rows ?? []).map((r) => ({
+    productA: r.product_a,
+    productB: r.product_b,
+    coOrders: Number(r.co_orders),
+  }));
+}
+
+/* ============================================================
+ * 시간대별 객단가 (오전 vs 오후)
+ * ========================================================== */
+export interface DaypartSlice {
+  daypart: string; // 새벽/오전/점심/오후/저녁
+  startHour: number;
+  revenue: number;
+  orderCount: number;
+  avgTicket: number;
+}
+
+export async function getDaypartSeries(range: DateRange = {}): Promise<DaypartSlice[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const rows = await db.execute<{
+    daypart: string;
+    start_hour: string;
+    revenue: string;
+    order_count: string;
+  }>(sql`
+    SELECT
+      CASE
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 7  THEN '새벽 (0-6)'
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 11 THEN '오전 (7-10)'
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 14 THEN '점심 (11-13)'
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 18 THEN '오후 (14-17)'
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 22 THEN '저녁 (18-21)'
+        ELSE '심야 (22-23)'
+      END AS daypart,
+      CASE
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 7  THEN 0
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 11 THEN 7
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 14 THEN 11
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 18 THEN 14
+        WHEN EXTRACT(hour FROM (completed_at AT TIME ZONE 'Asia/Seoul')) < 22 THEN 18
+        ELSE 22
+      END AS start_hour,
+      COALESCE(SUM(total_amount), 0)::bigint AS revenue,
+      COUNT(*)::bigint AS order_count
+    FROM orders
+    WHERE order_state = 'COMPLETED' AND ${rangeClause(r)}
+    GROUP BY 1, 2
+    ORDER BY 2
+  `);
+  return (rows ?? []).map((r) => {
+    const revenue = Number(r.revenue);
+    const orderCount = Number(r.order_count);
+    return {
+      daypart: r.daypart,
+      startHour: Number(r.start_hour),
+      revenue,
+      orderCount,
+      avgTicket: orderCount > 0 ? Math.round(revenue / orderCount) : 0,
+    };
+  });
+}
+
+/* ============================================================
+ * 채널(source)별 매출
+ * ========================================================== */
+export interface ChannelSlice {
+  source: string;
+  revenue: number;
+  count: number;
+  share: number;
+}
+
+export async function getChannelMix(range: DateRange = {}): Promise<ChannelSlice[]> {
+  const r: DateRange = { ...range, fallbackDays: 30 };
+  const rows = await db.execute<{ source: string; revenue: string; cnt: string }>(sql`
+    SELECT
+      source,
+      COALESCE(SUM(total_amount), 0)::bigint AS revenue,
+      COUNT(*)::bigint AS cnt
+    FROM orders
+    WHERE order_state = 'COMPLETED' AND ${rangeClause(r)}
+    GROUP BY 1
+    ORDER BY 2 DESC
+  `);
+  const items = (rows ?? []).map((r) => ({
+    source: r.source,
+    revenue: Number(r.revenue),
+    count: Number(r.cnt),
+    share: 0,
+  }));
+  const total = items.reduce((s, x) => s + x.revenue, 0);
+  return items.map((x) => ({ ...x, share: total > 0 ? x.revenue / total : 0 }));
 }

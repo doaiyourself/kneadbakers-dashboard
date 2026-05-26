@@ -72,8 +72,21 @@ const config: Config = {
         sm: "calc(var(--radius) - 4px)",
       },
       fontFamily: {
-        sans: ["Pretendard", "ui-sans-serif", "system-ui", "sans-serif"],
-        serif: ["GT Sectra", "Nanum Myeongjo", "ui-serif", "serif"],
+        // 모든 텍스트(헤딩 포함)를 Pretendard 통일
+        sans: [
+          "Pretendard Variable",
+          "Pretendard",
+          "ui-sans-serif",
+          "system-ui",
+          "sans-serif",
+        ],
+        serif: [
+          "Pretendard Variable",
+          "Pretendard",
+          "ui-sans-serif",
+          "system-ui",
+          "sans-serif",
+        ],
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
       keyframes: {
