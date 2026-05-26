@@ -37,7 +37,7 @@ export default async function ProductsPage({
 
   return (
     <div className="space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-3">
+      <header className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-end md:justify-between">
         <div>
           <h1 className="font-serif text-2xl font-semibold">상품 분석</h1>
           <p className="text-sm text-muted-foreground">
