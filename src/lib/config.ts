@@ -42,6 +42,11 @@ const serverEnvSchema = z.object({
   SLACK_WEBHOOK_URL: z.string().url().optional(),
   RESEND_API_KEY: z.string().optional(),
   ALERT_EMAIL_FROM: z.string().email().optional(),
+
+  // Anthropic Claude API — AI 기반 매출 분석/전략 추천에 사용 (선택)
+  ANTHROPIC_API_KEY: z.string().optional(),
+  /** 사용할 Claude 모델 — 기본 sonnet 4.5 */
+  ANTHROPIC_MODEL: z.string().optional().default("claude-sonnet-4-5"),
 });
 
 type ServerEnv = z.infer<typeof serverEnvSchema>;
