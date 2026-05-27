@@ -19,7 +19,8 @@
     "db:studio": "drizzle-kit studio",
     "db:seed": "tsx src/lib/db/seed.ts",
     "test:toss-connection": "tsx -r dotenv/config src/scripts/test-toss-connection.ts dotenv_config_path=.env.local",
-    "backfill": "tsx -r dotenv/config src/scripts/backfill.ts dotenv_config_path=.env.local"
+    "backfill": "tsx -r dotenv/config src/scripts/backfill.ts dotenv_config_path=.env.local",
+    "sync:naver-place": "tsx -r dotenv/config src/scripts/sync-naver-place.ts dotenv_config_path=.env.local"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",

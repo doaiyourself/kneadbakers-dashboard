@@ -2,8 +2,10 @@ import { sql } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db/client";
-import { users } from "@/lib/db/schema";
+import { merchants, users } from "@/lib/db/schema";
 import { getServerEnv } from "@/lib/config";
+import type { NaverPlaceData } from "@/lib/naver/place";
+import { formatKRW } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +34,25 @@ export default async function SettingsPage() {
   }
 
   const env = getServerEnv();
+
+  // 매장 정보 — 네이버 플레이스 캐시
+  const merchantId = env.TOSS_MERCHANT_ID ? Number(env.TOSS_MERCHANT_ID) : null;
+  const merchantRow = merchantId
+    ? (
+        await db
+          .select({
+            id: merchants.id,
+            name: merchants.name,
+            naverPlaceId: merchants.naverPlaceId,
+            naverData: merchants.naverData,
+            naverFetchedAt: merchants.naverFetchedAt,
+          })
+          .from(merchants)
+          .where(sql`${merchants.id} = ${merchantId}`)
+          .limit(1)
+      )[0]
+    : null;
+  const naver = (merchantRow?.naverData ?? null) as NaverPlaceData | null;
 
   // 사용자 목록
   const userList = await db
@@ -78,6 +99,111 @@ export default async function SettingsPage() {
           <Row label="토스 가맹점 ID">{env.TOSS_MERCHANT_ID ?? "(미설정)"}</Row>
           <Row label="기본 시간대">Asia/Seoul (KST)</Row>
         </dl>
+      </section>
+
+      {/* 네이버 플레이스 */}
+      <section className="rounded-lg border border-border bg-card p-5 shadow-sm">
+        <div className="mb-4 flex items-baseline justify-between">
+          <h2 className="font-semibold">🟢 네이버 플레이스</h2>
+          {merchantRow?.naverFetchedAt && (
+            <span className="text-[11px] text-muted-foreground">
+              마지막 동기화: {new Date(merchantRow.naverFetchedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}
+            </span>
+          )}
+        </div>
+        {naver ? (
+          <>
+            <dl className="grid grid-cols-1 gap-y-3 text-sm md:grid-cols-2">
+              <Row label="매장명">{naver.name}</Row>
+              <Row label="카테고리">{naver.category ?? "—"}</Row>
+              <Row label="주소">{naver.address ?? "—"}</Row>
+              <Row label="도로명">{naver.roadAddress ?? "—"}</Row>
+              <Row label="네이버 Place ID">
+                <a
+                  href={`https://m.place.naver.com/restaurant/${naver.placeId}/home`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline"
+                >
+                  {naver.placeId} ↗
+                </a>
+              </Row>
+              <Row label="지하철">
+                {naver.subwayStations.length > 0
+                  ? naver.subwayStations.map((s) => `${s.name} (${s.line})`).join(", ")
+                  : "—"}
+              </Row>
+            </dl>
+
+            {/* 리뷰 통계 */}
+            <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-4">
+              <Metric label="방문자 리뷰" value={naver.visitorReviewsTotal} />
+              <Metric label="텍스트 리뷰" value={naver.visitorReviewsTextTotal} />
+              <Metric
+                label="사진 리뷰"
+                value={naver.visitorReviewsMediaTotal}
+              />
+              <Metric label="블로그 리뷰" value={naver.blogReviewsTotal} />
+            </div>
+
+            {/* 키워드 */}
+            {naver.keywords.length > 0 && (
+              <div className="mt-5">
+                <div className="mb-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+                  네이버 자동 키워드
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {naver.keywords.map((k) => (
+                    <span
+                      key={k}
+                      className="rounded-full bg-amber-50 px-2.5 py-1 text-xs text-amber-800 border border-amber-200"
+                    >
+                      #{k}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 메뉴 미리보기 */}
+            {naver.menu.length > 0 && (
+              <div className="mt-5">
+                <div className="mb-2 flex items-baseline justify-between">
+                  <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                    메뉴 ({naver.menu.length}개)
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 gap-1.5 text-xs md:grid-cols-2 lg:grid-cols-3">
+                  {naver.menu.slice(0, 18).map((m) => (
+                    <div
+                      key={m.id}
+                      className="flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-2.5 py-1.5"
+                    >
+                      <span className="truncate">{m.name}</span>
+                      <span className="shrink-0 tabular-nums text-muted-foreground">
+                        {m.price ? formatKRW(m.price) : "—"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {naver.menu.length > 18 && (
+                  <p className="mt-2 text-[11px] text-muted-foreground">
+                    {naver.menu.length - 18}개 더…
+                  </p>
+                )}
+              </div>
+            )}
+
+            <p className="mt-5 text-[11px] text-muted-foreground">
+              동기화: 터미널에서 <code className="rounded bg-muted px-1 py-0.5">npm run sync:naver-place</code>{" "}
+              (추후 cron 통합 예정)
+            </p>
+          </>
+        ) : (
+          <div className="rounded-md border border-dashed border-border bg-card/50 p-6 text-center text-sm text-muted-foreground">
+            아직 동기화 안 됨. 터미널에서 <code className="rounded bg-muted px-1 py-0.5">npm run sync:naver-place</code> 실행.
+          </div>
+        )}
       </section>
 
       {/* 토스 연동 */}
@@ -184,6 +310,15 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
     <div>
       <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</dt>
       <dd className="mt-0.5 break-all">{children}</dd>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border border-border bg-muted/30 p-3 text-center">
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-1 text-xl font-semibold tabular-nums">{value.toLocaleString()}</div>
     </div>
   );
 }

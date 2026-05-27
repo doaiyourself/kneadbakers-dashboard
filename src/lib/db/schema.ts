@@ -25,11 +25,20 @@ import {
 
 /* ============================================================
  * 1. merchants — 매장
+ *
+ * naver_data: 네이버 플레이스 기본 정보 캐시 (m.place.naver.com에서 추출).
+ *   { category, address, roadAddress, phone, hours, menu[], keywords[],
+ *     visitorReviewCount, blogReviewCount, businessStatus, ... }
+ *   raw payload는 분석/디버깅용으로 보관, 자주 쓰는 필드는 추후 컬럼화 가능.
  * ========================================================== */
 export const merchants = pgTable("merchants", {
   id: bigint("id", { mode: "number" }).primaryKey(), // 토스 merchantId
   name: text("name").notNull(),
   tossAppId: text("toss_app_id"),
+  // 네이버 플레이스 ID — 사장님이 한 번 등록하면 그 이후 자동 동기화
+  naverPlaceId: text("naver_place_id"),
+  naverData: jsonb("naver_data"),
+  naverFetchedAt: timestamp("naver_fetched_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
